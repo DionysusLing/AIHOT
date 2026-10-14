@@ -69,11 +69,41 @@ node --env-file=.env scripts/eval-selection.ts --gold .data/gold.jsonl --split d
 
 在后台 SelectBench 里逐条看判错的资料和模型给的理由：
 
+上传多模型报告时，同一 `caseId` 在各模型下须使用相同的 `gold`（`select`、`reject` 或 `either`），模型的 `decision` 可以不同。每个模型内的 `caseId` 必须是非空字符串且不能重复。非法或冲突的逐例数据返回 HTTP 400，在任何写入前拒绝整份报告。允许不同模型覆盖部分样本，也保留无 `cases` 或 `cases: []` 的仅汇总报告，以及旧版按模型名组织的报告格式。
+
 - 该选没选上，多半是评分标准里没说清它为什么重要：在 `selection-score.md` 里把这类价值写进“必须正常评价”的部分，给出例子。
 - 不该选却选上了，多半是噪声没压住：写进“必须压住”的部分。
 - 整体偏松或偏紧，而判错的条目分数都贴着门槛，再调 `industry/selection.ts` 的门槛。
 
 先改标准，再动门槛：门槛只能整体移动，解决不了“哪一类判错了”。每改一次跑一遍，SelectBench 里能看到每一版的对比。
+
+### 历史报告的只读检查
+
+新校验只影响之后的导入，不会修复已有记录。确认目标部署使用此表结构后，优先在数据库快照或只读副本上执行下列 SQL；线上检查应使用只读账号。按同一运行、同一 case 比较金标，不能跨运行比较（不同评测轮次可以重新标注）。
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '10s';
+SET LOCAL lock_timeout = '1s';
+
+-- 同一 case 在不同模型下的金标冲突；保留每个模型的原值供人工核对。
+SELECT run_id, case_id, count(DISTINCT gold) AS gold_count,
+       jsonb_object_agg(model, gold ORDER BY model) AS gold_by_model
+FROM selectbench_results
+GROUP BY run_id, case_id
+HAVING count(DISTINCT gold) > 1
+ORDER BY run_id, case_id;
+
+-- 旧版导入可能接受的非法金标。
+SELECT run_id, model, case_id, gold
+FROM selectbench_results
+WHERE gold IS NULL OR gold NOT IN ('select', 'reject', 'either')
+ORDER BY run_id, model, case_id;
+
+ROLLBACK;
+```
+
+超时只表示本次检查未完成，不表示没有冲突；大库可在两个查询中按 `run_id` 限定检查范围。结果为零也无法发现旧版 `ON CONFLICT DO NOTHING` 已忽略的同模型重复记录，这类问题需要核对原始报告。发现异常后保留原始报告并人工确认正确标注，不使用 `min(gold)` 自动修正，也不直接删除或覆盖历史记录。
 
 ## 换模型
 

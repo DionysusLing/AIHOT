@@ -31,6 +31,25 @@ export async function importSelectBenchRun(report: unknown, label: string, actor
   const models = (r.models ?? Object.fromEntries(Object.entries(r).filter(([k]) => k !== "meta"))) as Record<string, ModelReport>;
   const names = Object.keys(models).filter((m) => models[m]?.summary);
   if (!names.length) throw new Error("report has no model summaries");
+  // Validate all evidence before writing; a case may appear once per model with shared gold.
+  const goldByCase = new Map<string, string>();
+  for (const m of names) {
+    const cases = models[m]!.cases;
+    if (cases === undefined) continue;
+    if (!Array.isArray(cases)) throw Object.assign(new Error(`${m}: cases must be an array`), { statusCode: 400 });
+    const ids = new Set<string>();
+    for (const c of cases) {
+      if (!c || typeof c.caseId !== "string" || !c.caseId) throw Object.assign(new Error(`${m}: invalid caseId`), { statusCode: 400 });
+      if (ids.has(c.caseId)) throw Object.assign(new Error(`${m}: duplicate caseId ${c.caseId}`), { statusCode: 400 });
+      ids.add(c.caseId);
+      if (!["select", "reject", "either"].includes(c.gold)) throw Object.assign(new Error(`${m}: ${c.caseId}: invalid gold decision`), { statusCode: 400 });
+      const previousGold = goldByCase.get(c.caseId);
+      if (previousGold !== undefined && previousGold !== c.gold) {
+        throw Object.assign(new Error(`${m}: ${c.caseId}: conflicting gold decision across models`), { statusCode: 400 });
+      }
+      goldByCase.set(c.caseId, c.gold);
+    }
+  }
   const meta = r.meta ?? {};
   const id = `sb-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${randomBytes(3).toString("hex")}`;
   const summary = Object.fromEntries(names.map((m) => [m, { ...models[m]!.summary, sweep: models[m]!.sweep ?? [] }]));
